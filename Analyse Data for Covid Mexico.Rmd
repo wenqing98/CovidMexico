@@ -1,0 +1,317 @@
+---
+title: "Analyse Data for Covid Mexico"
+output: html_document
+---
+
+Model 1 - Logistic Regression
+Model 2 - Random Forest
+Model 3 - KNN
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(haven)
+library(dplyr)
+library(corrplot)
+library(ggplot2)
+library(GGally)
+library(ggfortify)
+library(DBI)
+library(tidyr)
+library(factoextra)
+library(cluster)
+library(car)
+library(olsrr)
+library(Metrics)
+library(caret)
+library(tree)
+library(randomForest)
+library(gbm)
+library(caTools)
+library(ROCR)
+library(glmnet)
+library(rpart)
+library(class)
+library(rpart)
+library(rpart.plot)
+```
+
+
+```{r}
+setwd("~/Resume/Analyse Data for Covid Mexico")
+```
+
+```{r}
+CovidData <- read.csv(file = '~/Resume/Analyse Data for Covid Mexico/Covid Data.csv')
+```
+
+Removing Variables (Due to computer specification)
+```{r}
+CovidData <- CovidData[-sample(1:nrow(CovidData), 948575),]
+```
+
+
+
+Checking 97/98/99 (Missing Values) inside the Database
+```{r}
+# Create an empty data frame with required columns
+result_df <- data.frame(Column = character(),
+                         Value_97 = numeric(),
+                         Value_98 = numeric(),
+                         Value_99 = numeric(),
+                         stringsAsFactors = FALSE)
+
+# Loop over each column in CovidData
+for (col in colnames(CovidData)) {
+  # Calculate the count of each value for the current column
+  count_97 <- sum(CovidData[col] == 97)
+  count_98 <- sum(CovidData[col] == 98)
+  count_99 <- sum(CovidData[col] == 99)
+  
+  # Add a row to the data frame with the results for the current column
+  result_df <- rbind(result_df, data.frame(Column = col,
+                                           Value_97 = count_97,
+                                           Value_98 = count_98,
+                                           Value_99 = count_99,
+                                           stringsAsFactors = FALSE))
+}
+
+# Print the resulting data frame
+print(result_df)
+```
+**Comment: Pregnat/Intubed/ICU has a significant amount of 97/98/99 missing values, cannot simply remove them** 
+
+Looking at individual column and the total as well as the type of data they contain
+
+```{r}
+aggregate(SEX ~ PREGNANT + SEX, data=CovidData, FUN=length)
+```
+
+Any values that is 97/98 will become 2 since PREGNAT == 2 is Male thus it does not make sense if they are pregnat
+```{r}
+CovidData$PREGNANT <- ifelse(CovidData$PREGNANT== 97, 2, CovidData$PREGNANT)
+CovidData$PREGNANT <- ifelse(CovidData$PREGNANT== 98, 2, CovidData$PREGNANT)
+```
+
+Changing this set of code that contains "9999-99-99" to "No" and "Yes"
+```{r}
+CovidData$DEATH <- ifelse(CovidData$DATE_DIED == "9999-99-99", "No", "Yes")
+```
+
+
+
+```{r}
+aggregate(PATIENT_TYPE ~ ICU + PATIENT_TYPE, data=CovidData, FUN=length)
+```
+
+Removing the columns as it contains too much missing data
+```{r}
+CovidData <- CovidData[, -which(names(CovidData) %in% c("INTUBED","ICU","DATE_DIED"))]
+```
+
+
+Removing all the remaining rows that contains 97/98/99
+```{r}
+for (col in colnames(CovidData)) {
+  CovidData <- CovidData[!(CovidData[,col] %in% c(97, 98, 99)), ]
+}
+```
+
+
+```{r}
+CovidData$AgeGroup <- NA
+CovidData[CovidData$AGE <= 20, "AgeGroup"] <- "0-20"
+CovidData[CovidData$AGE > 20 & CovidData$AGE <= 40, "AgeGroup"] <- "21-40"
+CovidData[CovidData$AGE > 40 & CovidData$AGE <= 59, "AgeGroup"] <- "40-59"
+CovidData[CovidData$AGE >= 60, "AgeGroup"] <- "60++"
+```
+
+** In the event the codes do not work, we have to group 7 of the classification result together into just 2 group "1", "2" **
+```{r}
+CovidData$NEW_CLASIFFICATION_FINAL <- NA
+CovidData[CovidData$CLASIFFICATION_FINAL <= 4, "NEW_CLASIFFICATION_FINAL"] <- "1"
+CovidData[CovidData$CLASIFFICATION_FINAL > 4 , "NEW_CLASIFFICATION_FINAL"] <- "2"
+```
+
+Removing all the rows that contain 2 in their new classification status
+```{r}
+CovidData <- CovidData[CovidData$NEW_CLASIFFICATION_FINAL != 2,]
+```
+
+```{r}
+CovidData <- CovidData[, -which(names(CovidData) %in% c("AGE","CLASIFFICATION_FINAL", "MEDICAL_UNIT", "NEW_CLASIFFICATION_FINAL"))]
+```
+
+Changing all the variables into factor to apply classification techniques
+```{r}
+CovidData$USMER <- as.factor(CovidData$USMER)
+CovidData$SEX <- as.factor(CovidData$SEX)
+CovidData$PATIENT_TYPE <- as.factor(CovidData$PATIENT_TYPE)
+CovidData$PNEUMONIA <- as.factor(CovidData$PNEUMONIA)
+CovidData$PREGNANT <- as.factor(CovidData$PREGNANT)
+CovidData$DIABETES <- as.factor(CovidData$DIABETES)
+CovidData$COPD <- as.factor(CovidData$COPD)
+CovidData$ASTHMA <- as.factor(CovidData$ASTHMA)
+CovidData$INMSUPR <- as.factor(CovidData$INMSUPR)
+CovidData$HIPERTENSION <- as.factor(CovidData$HIPERTENSION)
+CovidData$OTHER_DISEASE <- as.factor(CovidData$OTHER_DISEASE)
+CovidData$CARDIOVASCULAR <- as.factor(CovidData$CARDIOVASCULAR)
+CovidData$OBESITY <- as.factor(CovidData$OBESITY)
+CovidData$RENAL_CHRONIC <- as.factor(CovidData$RENAL_CHRONIC)
+CovidData$TOBACCO <- as.factor(CovidData$TOBACCO)
+CovidData$DEATH <- as.factor(CovidData$DEATH)
+CovidData$AgeGroup <- as.factor(CovidData$AgeGroup)
+```
+
+
+```{r}
+death_freq <- table(CovidData$DEATH)
+
+# Convert the result to a data frame
+df_death_freq <- data.frame(DEATH = names(death_freq),
+                            Frequency = as.numeric(death_freq))
+
+# Create a bar plot using ggplot2
+ggplot(df_death_freq, aes(x = DEATH, y = Frequency, fill = DEATH)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Frequency of DEATH variable",
+       x = "DEATH", y = "Frequency") +
+  scale_fill_manual(values = c("#00AFBB", "#FC4E07"), labels = c("No", "Yes"))
+```
+Comment: Too much "No" in "Death" column, might cause model to be bias
+
+
+Random Under Sample
+Note: Doing this might introduce “distortion” to the data values composition, hence giving a model which is not accurate
+```{r}
+count_df <- CovidData %>% count(DEATH)
+n_no <- count_df$n[which(count_df$DEATH == "No")]
+n_yes <- count_df$n[which(count_df$DEATH == "Yes")]
+CovidData <- CovidData %>%
+  group_by(DEATH) %>%
+  slice_sample(n = min(n_no, n_yes), replace = FALSE)
+```
+
+```{r}
+death_freq <- table(CovidData$DEATH)
+
+# Convert the result to a data frame
+df_death_freq <- data.frame(DEATH = names(death_freq),
+                            Frequency = as.numeric(death_freq))
+
+# Create a bar plot using ggplot2
+ggplot(df_death_freq, aes(x = DEATH, y = Frequency, fill = DEATH)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Frequency of DEATH variable",
+       x = "DEATH", y = "Frequency") +
+  scale_fill_manual(values = c("#00AFBB", "#FC4E07"), labels = c("No", "Yes"))
+```
+
+
+Logistic Regression 
+```{r}
+train <- sample.split(Y=CovidData$DEATH, SplitRatio=0.7)
+trainset <- subset(CovidData, train==T)
+testset <- subset(CovidData, train==F)
+model <- glm(DEATH ~.,family=binomial(link='logit'),data = trainset)
+summary(model)
+```
+
+```{r}
+OR <- exp(coef(model))
+OR
+```
+
+Checking accuracy/precision/recall/F1 score on training result
+```{r}
+prob.train <- predict(model, type = "response")
+predict.y.train <- ifelse(prob.train > 0.5, "Yes", "No")
+table.train <- table(trainset$DEATH, predict.y.train)
+table.train
+prop.table(table.train)
+mean(predict.y.train == trainset$DEATH)
+```
+
+Checking accuracy/precision/recall/F1 score on test result
+```{r}
+prob.test <- predict(model, newdata = testset, type = "response")
+predict.y.test <- ifelse(prob.test > 0.5, "Yes", "No")
+table.test <- table(testset$DEATH, predict.y.test)
+
+accuracy <- mean(predict.y.test == testset$DEATH)
+precision <- table.test[2,2] / (table.test[2,2] + table.test[1,2])
+recall <- table.test[2,2] / (table.test[2,2] + table.test[2,1])
+f1_score <- 2 * precision * recall / (precision + recall)
+table.test
+cat("\n")
+prop.table(table.test)
+cat("\n")
+cat("Accuracy:", accuracy, "\n")
+cat("Precision:", precision, "\n")
+cat("Recall:", recall, "\n")
+cat("F1 Score:", f1_score, "\n")
+```
+
+```{r}
+pr.glm1 <- prediction(prob.test, testset$DEATH)
+prf.glm1 <- performance(pr.glm1, measure="tpr", x.measure="fpr")
+plot(prf.glm1)
+abline(a=0, b=1)
+```
+
+
+
+
+
+Random Forest
+```{r}
+model.rf <- randomForest(DEATH~., data=trainset, importance=TRUE)
+model.rf
+```
+
+```{r}
+varImpPlot(model.rf)
+```
+
+```{r}
+prob.train.rf <- predict(model.rf, newdata=testset)
+error <- mean(prob.train.rf != testset$DEATH)
+print(paste('Accuracy', 1-error))
+```
+
+```{r}
+predictions <- predict(model.rf, newdata = testset)
+Confusion.Matrix.RF <- confusionMatrix(predictions, testset$DEATH)
+Confusion.Matrix.RF
+```
+
+
+
+K-Nearest Neighbors
+```{r}
+set.seed(150)
+# train knn model
+model_knn <- train(DEATH ~ ., data = trainset, method = "knn", trControl = trainControl(method = "cv", number = 10))
+print(model_knn)
+```
+
+```{r}
+# predicting on the test set and calculating the accuracy
+predictions_knn <- predict(model_knn, newdata = testset)
+accuracy_knn <- mean(predictions_knn == testset$DEATH)
+#Generating the confusion matrix
+conf_matrix_knn <- confusionMatrix(predictions_knn, testset$DEATH)
+prec_knn <- conf_matrix_knn$byClass[1]
+rec_knn <- conf_matrix_knn$byClass[2]
+F1_knn <- (2 * prec_knn * rec_knn) / (prec_knn + rec_knn)
+
+print(conf_matrix_knn$table)
+cat("\n")
+cat("Accuracy on testing data:", accuracy_knn, "\n")
+cat("Precision:", prec_knn, "\n")
+cat("Recall:", rec_knn, "\n")
+cat("F1 Score:", F1_knn, "\n")
+```
